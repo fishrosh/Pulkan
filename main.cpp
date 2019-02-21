@@ -47,6 +47,15 @@ struct QueueFamilyIndices {
 	}
 };
 
+struct SwapChain {
+	VkSwapchainKHR swapChain;
+
+	std::vector<VkImage> swapChainImages;
+	std::vector<VkImageView> swapChainImageViews;
+	std::vector<VkFramebuffer> swapChainFramebuffers;
+	std::vector<VkCommandBuffer> commandBuffers;
+};
+
 class HelloTriangleApplication {
 public:
 	void run() {
@@ -66,27 +75,25 @@ private:
 	VkSurfaceKHR surface;
 	VkSurfaceKHR secondSurface;
 
+	SwapChain swapChain;
+	SwapChain secondSwapChain;
+
+
 	VkCommandPool commandPool;
 	VkPipeline graphicsPipeline;
 	VkRenderPass renderPass;
 	VkPipelineLayout pipelineLayout;
-	VkSwapchainKHR swapChain;
 	VkQueue graphicsQueue;
 	VkQueue presentQueue;
 	VkDevice device;
 	VkInstance instance;
 	VkDebugUtilsMessengerEXT debugMessenger;
 	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
-	std::vector<VkImage> swapChainImages;
 	VkFormat swapChainImageFormat;
 	VkExtent2D swapChainExtent;
 
 	VkSemaphore imageAvailableSemaphore;
 	VkSemaphore renderFinishedSemaphore;
-
-	std::vector<VkImageView> swapChainImageViews;
-	std::vector<VkFramebuffer> swapChainFramebuffers;
-	std::vector<VkCommandBuffer> commandBuffers;
 
 	const std::vector<const char*> validationLayers = {
 		"VK_LAYER_LUNARG_standard_validation"
@@ -118,20 +125,23 @@ private:
 		createSurfaces();
 		pickPhysicalDevice();
 		createLogicalDevice();
-		createSwapChain();
-		createImageViews();
+
+		createSwapChainGlobals();
 		createRenderPass();
 		createGraphicsPipeline();
-		createFramebuffers();
 		createCommandPool();
-		createCommandBuffers();
+
+		createSwapChainPipeline(surface, swapChain);
+		createSwapChainPipeline(secondSurface, secondSwapChain);
+		
 		createSemaphores();
 	}
 
 	void mainLoop() {
 		while (!glfwWindowShouldClose(window) && !glfwWindowShouldClose(secondWindow)) {
 			glfwPollEvents();
-			drawFrame();
+			drawFrame(swapChain);
+			drawFrame(secondSwapChain);
 		}
 
 		vkDeviceWaitIdle(device);
@@ -143,7 +153,7 @@ private:
 
 		vkDestroyCommandPool(device, commandPool, nullptr);
 
-		for (auto framebuffer : swapChainFramebuffers) {
+		for (auto framebuffer : swapChain.swapChainFramebuffers) {
 			vkDestroyFramebuffer(device, framebuffer, nullptr);
 		}
 
@@ -153,11 +163,11 @@ private:
 
 		vkDestroyRenderPass(device, renderPass, nullptr);
 
-		for (auto imageView : swapChainImageViews) {
+		for (auto imageView : swapChain.swapChainImageViews) {
 			vkDestroyImageView(device, imageView, nullptr);
 		}
 
-		vkDestroySwapchainKHR(device, swapChain, nullptr);
+		vkDestroySwapchainKHR(device, swapChain.swapChain, nullptr);
 
 		vkDestroyDevice(device, nullptr);
 
@@ -439,7 +449,25 @@ private:
 		return details;
 	}
 
-	void createSwapChain() {
+	void createSwapChainPipeline(VkSurfaceKHR& surface, SwapChain& swapChain) {
+		createSwapChain(surface, swapChain);
+		createImageViews(swapChain);
+		createFramebuffers(swapChain);
+		createCommandBuffers(swapChain);
+	}
+
+	void createSwapChainGlobals() {
+		SwapChainSupportDetails swapChainSupport = querySwapChainSupport(physicalDevice);
+
+		VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(swapChainSupport.formats);
+		VkPresentModeKHR presentMode = chooseSwapPresentMode(swapChainSupport.presentModes);
+		VkExtent2D extent = chooseSwapExtent(swapChainSupport.capabilities);
+
+		swapChainImageFormat = surfaceFormat.format;
+		swapChainExtent = extent;
+	}
+
+	void createSwapChain(VkSurfaceKHR& surface, SwapChain& swapChain) {
 		SwapChainSupportDetails swapChainSupport = querySwapChainSupport(physicalDevice);
 
 		VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(swapChainSupport.formats);
@@ -485,25 +513,22 @@ private:
 
 		createInfo.oldSwapchain = VK_NULL_HANDLE;
 
-		if (vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapChain) != VK_SUCCESS) {
+		if (vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapChain.swapChain) != VK_SUCCESS) {
 			throw std::runtime_error("failed to create swap chain!");
 		}
 
-		vkGetSwapchainImagesKHR(device, swapChain, &imageCount, nullptr);
-		swapChainImages.resize(imageCount);
-		vkGetSwapchainImagesKHR(device, swapChain, &imageCount, swapChainImages.data());
-
-		swapChainImageFormat = surfaceFormat.format;
-		swapChainExtent = extent;
+		vkGetSwapchainImagesKHR(device, swapChain.swapChain, &imageCount, nullptr);
+		swapChain.swapChainImages.resize(imageCount);
+		vkGetSwapchainImagesKHR(device, swapChain.swapChain, &imageCount, swapChain.swapChainImages.data());
 	}
 
-	void createImageViews() {
-		swapChainImageViews.resize(swapChainImages.size());
+	void createImageViews(SwapChain& swapChain) {
+		swapChain.swapChainImageViews.resize(swapChain.swapChainImages.size());
 
-		for (size_t i = 0; i < swapChainImages.size(); i++) {
+		for (size_t i = 0; i < swapChain.swapChainImages.size(); i++) {
 			VkImageViewCreateInfo createInfo = {};
 			createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-			createInfo.image = swapChainImages[i];
+			createInfo.image = swapChain.swapChainImages[i];
 			createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
 			createInfo.format = swapChainImageFormat;
 
@@ -518,7 +543,7 @@ private:
 			createInfo.subresourceRange.baseArrayLayer = 0;
 			createInfo.subresourceRange.layerCount = 1;
 
-			if (vkCreateImageView(device, &createInfo, nullptr, &swapChainImageViews[i]) != VK_SUCCESS) {
+			if (vkCreateImageView(device, &createInfo, nullptr, &swapChain.swapChainImageViews[i]) != VK_SUCCESS) {
 				throw std::runtime_error("failed to create image views!");
 			}
 		}
@@ -691,12 +716,12 @@ private:
 		}
 	}
 
-	void createFramebuffers() {
-		swapChainFramebuffers.resize(swapChainImageViews.size());
+	void createFramebuffers(SwapChain& swapChain) {
+		swapChain.swapChainFramebuffers.resize(swapChain.swapChainImageViews.size());
 
-		for (size_t i = 0; i < swapChainImageViews.size(); i++) {
+		for (size_t i = 0; i < swapChain.swapChainImageViews.size(); i++) {
 			VkImageView attachments[] = {
-				swapChainImageViews[i]
+				swapChain.swapChainImageViews[i]
 			};
 
 			VkFramebufferCreateInfo framebufferInfo = {};
@@ -708,7 +733,7 @@ private:
 			framebufferInfo.height = swapChainExtent.height;
 			framebufferInfo.layers = 1;
 
-			if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &swapChainFramebuffers[i]) != VK_SUCCESS) {
+			if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &swapChain.swapChainFramebuffers[i]) != VK_SUCCESS) {
 				throw std::runtime_error("failed to create framebuffer!");
 			}
 		}
@@ -727,33 +752,33 @@ private:
 		}
 	}
 
-	void createCommandBuffers() {
-		commandBuffers.resize(swapChainFramebuffers.size());
+	void createCommandBuffers(SwapChain& swapChain) {
+		swapChain.commandBuffers.resize(swapChain.swapChainFramebuffers.size());
 
 		VkCommandBufferAllocateInfo allocInfo = {};
 		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
 		allocInfo.commandPool = commandPool;
 		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-		allocInfo.commandBufferCount = (uint32_t)commandBuffers.size();
+		allocInfo.commandBufferCount = (uint32_t)swapChain.commandBuffers.size();
 
-		if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS) {
+		if (vkAllocateCommandBuffers(device, &allocInfo, swapChain.commandBuffers.data()) != VK_SUCCESS) {
 			throw std::runtime_error("failed to allocate command buffers!");
 		}
 
-		for (size_t i = 0; i < commandBuffers.size(); i++) {
+		for (size_t i = 0; i < swapChain.commandBuffers.size(); i++) {
 			VkCommandBufferBeginInfo beginInfo = {};
 			beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 			beginInfo.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
 			beginInfo.pInheritanceInfo = nullptr; // Optional
 
-			if (vkBeginCommandBuffer(commandBuffers[i], &beginInfo) != VK_SUCCESS) {
+			if (vkBeginCommandBuffer(swapChain.commandBuffers[i], &beginInfo) != VK_SUCCESS) {
 				throw std::runtime_error("failed to begin recording command buffer!");
 			}
 
 			VkRenderPassBeginInfo renderPassInfo = {};
 			renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 			renderPassInfo.renderPass = renderPass;
-			renderPassInfo.framebuffer = swapChainFramebuffers[i];
+			renderPassInfo.framebuffer = swapChain.swapChainFramebuffers[i];
 
 			renderPassInfo.renderArea.offset = { 0, 0 };
 			renderPassInfo.renderArea.extent = swapChainExtent;
@@ -762,20 +787,20 @@ private:
 			renderPassInfo.clearValueCount = 1;
 			renderPassInfo.pClearValues = &clearColor;
 
-			vkCmdBeginRenderPass(commandBuffers[i], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-			vkCmdBindPipeline(commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
-			vkCmdDraw(commandBuffers[i], 3, 1, 0, 0);
-			vkCmdEndRenderPass(commandBuffers[i]);
+			vkCmdBeginRenderPass(swapChain.commandBuffers[i], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+			vkCmdBindPipeline(swapChain.commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+			vkCmdDraw(swapChain.commandBuffers[i], 3, 1, 0, 0);
+			vkCmdEndRenderPass(swapChain.commandBuffers[i]);
 
-			if (vkEndCommandBuffer(commandBuffers[i]) != VK_SUCCESS) {
+			if (vkEndCommandBuffer(swapChain.commandBuffers[i]) != VK_SUCCESS) {
 				throw std::runtime_error("failed to record command buffer!");
 			}
 		}
 	}
 
-	void drawFrame() {
+	void drawFrame(SwapChain& swapChain) {
 		uint32_t imageIndex;
-		vkAcquireNextImageKHR(device, swapChain, std::numeric_limits<uint64_t>::max(), imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+		vkAcquireNextImageKHR(device, swapChain.swapChain, std::numeric_limits<uint64_t>::max(), imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
 
 		VkSubmitInfo submitInfo = {};
 		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -787,7 +812,7 @@ private:
 		submitInfo.pWaitDstStageMask = waitStages;
 
 		submitInfo.commandBufferCount = 1;
-		submitInfo.pCommandBuffers = &commandBuffers[imageIndex];
+		submitInfo.pCommandBuffers = &swapChain.commandBuffers[imageIndex];
 
 		VkSemaphore signalSemaphores[] = { renderFinishedSemaphore };
 		submitInfo.signalSemaphoreCount = 1;
@@ -803,7 +828,7 @@ private:
 		presentInfo.waitSemaphoreCount = 1;
 		presentInfo.pWaitSemaphores = signalSemaphores;
 
-		VkSwapchainKHR swapChains[] = { swapChain };
+		VkSwapchainKHR swapChains[] = { swapChain.swapChain };
 		presentInfo.swapchainCount = 1;
 		presentInfo.pSwapchains = swapChains;
 		presentInfo.pImageIndices = &imageIndex;
