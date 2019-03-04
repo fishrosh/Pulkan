@@ -14,6 +14,8 @@
 
 #include "lodepng.h"
 
+#define VK_CHECK_RESULT( x, y ) if ( x != VK_SUCCESS) throw std::runtime_error( y );
+
 const int WIDTH = 800;
 const int HEIGHT = 600;
 
@@ -73,6 +75,7 @@ struct Context {
 	VkFormat* swapChainImageFormat;
 	VkExtent2D* swapChainExtent;
 	VkPhysicalDevice* physicalDevice;
+	VkBuffer* buffer;
 };
 
 VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats) {
@@ -338,13 +341,36 @@ struct SwapChain {
 
 			vkCmdBeginRenderPass(commandBuffers[i], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 			vkCmdBindPipeline(commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, *context.graphicsPipeline);
-			vkCmdDraw(commandBuffers[i], 3, 1, 0, 0);
+			//vkCmdDraw(commandBuffers[i], 3, 1, 0, 0);
+			recordCopyBufferToImageCommand(commandBuffers[i], *context.buffer, swapChainImages[i]);
 			vkCmdEndRenderPass(commandBuffers[i]);
 
 			if (vkEndCommandBuffer(commandBuffers[i]) != VK_SUCCESS) {
 				throw std::runtime_error("failed to record command buffer!");
 			}
 		}
+	}
+
+	void recordCopyBufferToImageCommand(VkCommandBuffer& commandBuffer, VkBuffer buffer, VkImage image) {
+		VkBufferImageCopy region = {};
+		region.bufferOffset = 0;
+		region.bufferRowLength = 0;
+		region.bufferImageHeight = 0;
+
+		region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		region.imageSubresource.mipLevel = 0;
+		region.imageSubresource.baseArrayLayer = 0;
+		region.imageSubresource.layerCount = 1;
+
+		region.imageOffset = { 0, 0, 0 };
+		region.imageExtent = {
+			WIDTH_C,
+			HEIGHT_C,
+			1
+		};
+
+		//vkCmdCopyImageToBuffer(commandBuffer, image, VK_IMAGE_LAYOUT_GENERAL, buffer, 1, &region);
+		vkCmdCopyBufferToImage(commandBuffer, buffer, image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
 	}
 };
 
@@ -664,6 +690,7 @@ private:
 		context.swapChainImageFormat = &swapChainImageFormat;
 		context.computePipeline = &pipelineCompute;
 		context.computePipelineLayout = &pipelineComputeLayout;
+		context.buffer = &buffer;
 
 		swapChain.createSwapChainPipeline(context, surface);
 		secondSwapChain.createSwapChainPipeline(context, secondSurface);
@@ -730,6 +757,11 @@ private:
 	VkDescriptorSetLayout descriptorComputeLayout;
 	VkDescriptorPool descriptorPool;
 
+	VkImage imageBuffer;
+	VkDeviceMemory imageBufferMemory;
+	VkImageLayout imageBufferLayout;
+	VkImageView imageBufferView;
+
 	VkBuffer buffer;
 	uint32_t bufferSize;
 	VkDeviceMemory bufferMemory;
@@ -738,6 +770,8 @@ private:
 		bufferSize = sizeof(Pixel) * WIDTH_C * HEIGHT_C;
 
 		createBuffer();
+		createImage();
+
 		createDescriptorSetLayout();
 		createDescriptorSet();
 		createComputePipeline();
@@ -745,6 +779,9 @@ private:
 
 		runCommandBuffer();
 
+#ifdef USE_IMAGE
+		copyImageToBuffer(buffer, imageBuffer, WIDTH_C, HEIGHT_C);
+#endif
 		saveRenderedImage();
 
 		// Clean up all vulkan resources.
@@ -758,6 +795,7 @@ private:
 	void saveRenderedImage() {
 		void* mappedMemory = NULL;
 		// Map the buffer memory, so that we can read from it on the CPU.
+
 		vkMapMemory(device, bufferMemory, 0, bufferSize, 0, &mappedMemory);
 		Pixel* pmappedMemory = (Pixel *)mappedMemory;
 
@@ -769,7 +807,8 @@ private:
 			image.push_back((unsigned char)(255.0f * (pmappedMemory[i].r)));
 			image.push_back((unsigned char)(255.0f * (pmappedMemory[i].g)));
 			image.push_back((unsigned char)(255.0f * (pmappedMemory[i].b)));
-			image.push_back((unsigned char)(255.0f * (pmappedMemory[i].a)));
+			image.push_back((unsigned char)(255.0f * 1));
+			//for (int i = 0; i < 4; ++i) image.push_back(255);
 		}
 		// Done reading, so unmap.
 		vkUnmapMemory(device, bufferMemory);
@@ -822,10 +861,56 @@ private:
 		}
 	}
 
+	void createImage() {
+		VkImageCreateInfo createInfo = {};
+		createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		createInfo.imageType = VK_IMAGE_TYPE_2D;
+		createInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+		createInfo.mipLevels = 1;
+		createInfo.arrayLayers = 1;
+		createInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		createInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		createInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		createInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		createInfo.extent = { WIDTH_C, HEIGHT_C, 1 };
+		createInfo.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT;  // !!!!!!!!!!!!!!!!!!!
+
+		VK_CHECK_RESULT(vkCreateImage(device, &createInfo, nullptr, &imageBuffer), "failed to create image buffer");
+
+		VkImageViewCreateInfo imageViewCreateInfo = {};
+		imageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		imageViewCreateInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+		imageViewCreateInfo.image = imageBuffer;
+		imageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		imageViewCreateInfo.subresourceRange.baseMipLevel = 0;
+		imageViewCreateInfo.subresourceRange.levelCount = 1;
+		imageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
+		imageViewCreateInfo.subresourceRange.layerCount = 1;
+
+		VK_CHECK_RESULT(vkCreateImageView(device, &imageViewCreateInfo, nullptr, &imageBufferView), "failed to create image buffer view");
+
+		imageBufferLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+		VkMemoryRequirements requirements;
+		vkGetImageMemoryRequirements(device, imageBuffer, &requirements);
+
+		VkMemoryAllocateInfo allocInfo = {};
+		allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		allocInfo.allocationSize = requirements.size;
+		allocInfo.memoryTypeIndex = findMemoryType(requirements.memoryTypeBits, 
+			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+			VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | 
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT); // !!!!!!!!!!!!!!!!!!!
+
+		VK_CHECK_RESULT(vkAllocateMemory(device, &allocInfo, nullptr, &imageBufferMemory), "failed to allocate image buffer memory");
+
+		VK_CHECK_RESULT(vkBindImageMemory(device, imageBuffer, imageBufferMemory, 0), "failed to bind image buffer memory");
+	}
+
 	void createDescriptorSetLayout() {
 		VkDescriptorSetLayoutBinding descriptorSetLayoutBinding = {};
 		descriptorSetLayoutBinding.binding = 0; // binding = 0
-		descriptorSetLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		descriptorSetLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 		descriptorSetLayoutBinding.descriptorCount = 1;
 		descriptorSetLayoutBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
@@ -841,7 +926,7 @@ private:
 
 	void createDescriptorSet() {
 		VkDescriptorPoolSize descriptorPoolSize = {};
-		descriptorPoolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		descriptorPoolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 		descriptorPoolSize.descriptorCount = 1;
 
 		VkDescriptorPoolCreateInfo descriptorPoolCreateInfo = {};
@@ -869,13 +954,23 @@ private:
 		descriptorBufferInfo.offset = 0;
 		descriptorBufferInfo.range = bufferSize;
 
+		VkDescriptorImageInfo descriptorImageInfo = {};
+		descriptorImageInfo.imageLayout = imageBufferLayout;
+		descriptorImageInfo.imageView = imageBufferView;
+
 		VkWriteDescriptorSet writeDescriptorSet = {};
 		writeDescriptorSet.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		writeDescriptorSet.dstSet = descriptorCompute; // write to this descriptor set.
 		writeDescriptorSet.dstBinding = 0; // write to the first, and only binding.
 		writeDescriptorSet.descriptorCount = 1; // update a single descriptor.
-		writeDescriptorSet.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; // storage buffer.
-		writeDescriptorSet.pBufferInfo = &descriptorBufferInfo; 
+
+#ifdef USE_IMAGE
+		writeDescriptorSet.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+		writeDescriptorSet.pImageInfo = &descriptorImageInfo;
+#else
+		writeDescriptorSet.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writeDescriptorSet.pBufferInfo = &descriptorBufferInfo;
+#endif
 
 		// perform the update of the descriptor set.
 		vkUpdateDescriptorSets(device, 1, &writeDescriptorSet, 0, NULL);
@@ -973,7 +1068,124 @@ private:
 		vkDestroyFence(device, fence, NULL);
 	}
 
+	void transitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout) {
+		VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+
+		VkImageMemoryBarrier barrier = {};
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barrier.oldLayout = oldLayout;
+		barrier.newLayout = newLayout;
+
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+
+		barrier.image = image;
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		barrier.subresourceRange.baseMipLevel = 0;
+		barrier.subresourceRange.levelCount = 1;
+		barrier.subresourceRange.baseArrayLayer = 0;
+		barrier.subresourceRange.layerCount = 1;
+
+		barrier.srcAccessMask = 0; // TODO
+		barrier.dstAccessMask = 0; // TODO
+
+		vkCmdPipelineBarrier(
+			commandBuffer,
+			0 /* TODO */, 0 /* TODO */,
+			0,
+			0, nullptr,
+			0, nullptr,
+			1, &barrier
+		);
+
+		endSingleTimeCommands(commandBuffer);
+	}
+
+	void copyImageToBuffer(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
+		VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+
+		VkBufferImageCopy region = {};
+		region.bufferOffset = 0;
+		region.bufferRowLength = 0;
+		region.bufferImageHeight = 0;
+
+		region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		region.imageSubresource.mipLevel = 0;
+		region.imageSubresource.baseArrayLayer = 0;
+		region.imageSubresource.layerCount = 1;
+
+		region.imageOffset = { 0, 0, 0 };
+		region.imageExtent = {
+			width,
+			height,
+			1
+		};
+
+		vkCmdCopyImageToBuffer(commandBuffer, image, VK_IMAGE_LAYOUT_GENERAL, buffer, 1, &region);
+
+		endSingleTimeCommands(commandBuffer);
+	}
+
+	void copyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
+		VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+
+		VkBufferImageCopy region = {};
+		region.bufferOffset = 0;
+		region.bufferRowLength = 0;
+		region.bufferImageHeight = 0;
+
+		region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		region.imageSubresource.mipLevel = 0;
+		region.imageSubresource.baseArrayLayer = 0;
+		region.imageSubresource.layerCount = 1;
+
+		region.imageOffset = { 0, 0, 0 };
+		region.imageExtent = {
+			width,
+			height,
+			1
+		};
+
+		//vkCmdCopyImageToBuffer(commandBuffer, image, VK_IMAGE_LAYOUT_GENERAL, buffer, 1, &region);
+		vkCmdCopyBufferToImage(commandBuffer, buffer, image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+
+		endSingleTimeCommands(commandBuffer);
+	}
+
 	// !!!!!!!!!!!!!!!!!!!!!! compute pipeline part
+
+	VkCommandBuffer beginSingleTimeCommands() {
+		VkCommandBufferAllocateInfo allocInfo = {};
+		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		allocInfo.commandPool = commandPool;
+		allocInfo.commandBufferCount = 1;
+
+		VkCommandBuffer commandBuffer;
+		vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+
+		VkCommandBufferBeginInfo beginInfo = {};
+		beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+		vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+		return commandBuffer;
+	}
+
+	void endSingleTimeCommands(VkCommandBuffer commandBuffer) {
+		vkEndCommandBuffer(commandBuffer);
+
+		VkSubmitInfo submitInfo = {};
+		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &commandBuffer;
+
+		vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+		vkQueueWaitIdle(graphicsQueue);
+
+		vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+	}
 
 	void createInstance() {
 		if (enableValidationLayers && !checkValidationLayerSupport()) {

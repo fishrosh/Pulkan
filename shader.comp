@@ -10,8 +10,10 @@ struct Pixel{
   vec4 value;
 };
 
-//layout(std140, binding = 0) buffer buf
-layout ( binding = 0, rgba8 ) uniform writeonly image2D buf
+
+/*layout ( std140, binding = 0 ) uniform writeonly image2D buf*/
+
+layout(std140, binding = 0) image2D imgOut
 {
    Pixel imageData[];
 };
