@@ -17,8 +17,8 @@
 const int WIDTH = 800;
 const int HEIGHT = 600;
 
-const int WIDTH_C = 3200; // Size of rendered mandelbrot set.
-const int HEIGHT_C = 2400; // Size of renderered mandelbrot set.
+const int WIDTH_C = 800; // Size of rendered mandelbrot set.
+const int HEIGHT_C = 600; // Size of renderered mandelbrot set.
 const int WORKGROUP_SIZE = 32; // Workgroup size in compute shader.
 
 VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
@@ -66,6 +66,8 @@ struct Pixel {
 struct Context {
 	VkCommandPool* commandPool;
 	VkPipeline* graphicsPipeline;
+	VkPipeline* computePipeline;
+	VkPipelineLayout* computePipelineLayout;
 	VkRenderPass* renderPass;
 	VkDevice* device;
 	VkFormat* swapChainImageFormat;
@@ -216,7 +218,7 @@ struct SwapChain {
 		createInfo.imageColorSpace = surfaceFormat.colorSpace;
 		createInfo.imageExtent = extent;
 		createInfo.imageArrayLayers = 1;
-		createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+		createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
 		QueueFamilyIndices indices = findQueueFamilies(*context.physicalDevice, surface);
 		uint32_t queueFamilyIndices[] = { indices.graphicsFamily, indices.presentFamily };
@@ -346,6 +348,229 @@ struct SwapChain {
 	}
 };
 
+struct SwapChainCompute {
+	VkSwapchainKHR swapChain;
+
+	std::vector<VkImage> swapChainImages;
+	std::vector<VkImageView> swapChainImageViews;
+	std::vector<VkFramebuffer> swapChainFramebuffers;
+	std::vector<VkDescriptorSet> descriptorSets;
+	std::vector<VkCommandBuffer> commandBuffers;
+
+	VkDescriptorPool descriptorPool;
+	VkDescriptorSetLayout descriptorSetLayout;
+
+	void createSwapChainPipeline(Context& context, VkSurfaceKHR surface) {
+		createSwapChain(context, surface);
+		createImageViews(context);
+		createFramebuffers(context);
+		createDescriptorSetLayout(context);
+		createDescriptorSets(context);
+		createCommandBuffers(context);
+	}
+
+	void createSwapChain(Context& context, VkSurfaceKHR surface) {
+		SwapChainSupportDetails swapChainSupport = querySwapChainSupport(*context.physicalDevice, surface);
+
+		VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(swapChainSupport.formats);
+		VkPresentModeKHR presentMode = chooseSwapPresentMode(swapChainSupport.presentModes);
+		VkExtent2D extent = chooseSwapExtent(swapChainSupport.capabilities);
+
+		uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
+
+		if (swapChainSupport.capabilities.maxImageCount > 0 && imageCount > swapChainSupport.capabilities.maxImageCount) {
+			imageCount = swapChainSupport.capabilities.maxImageCount;
+		}
+
+		VkSwapchainCreateInfoKHR createInfo = {};
+		createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+		createInfo.surface = surface;
+
+		createInfo.minImageCount = imageCount;
+		createInfo.imageFormat = surfaceFormat.format;
+		createInfo.imageColorSpace = surfaceFormat.colorSpace;
+		createInfo.imageExtent = extent;
+		createInfo.imageArrayLayers = 1;
+		createInfo.imageUsage = VK_IMAGE_USAGE_STORAGE_BIT;
+
+		QueueFamilyIndices indices = findQueueFamilies(*context.physicalDevice, surface);
+		uint32_t queueFamilyIndices[] = { indices.graphicsFamily, indices.presentFamily };
+
+		if (indices.graphicsFamily != indices.presentFamily) {
+			createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+			createInfo.queueFamilyIndexCount = 2;
+			createInfo.pQueueFamilyIndices = queueFamilyIndices;
+		}
+		else {
+			createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+			createInfo.queueFamilyIndexCount = 0; // Optional
+			createInfo.pQueueFamilyIndices = nullptr; // Optional
+		}
+
+		createInfo.preTransform = swapChainSupport.capabilities.currentTransform;
+		createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+
+		createInfo.presentMode = presentMode;
+		createInfo.clipped = VK_TRUE;
+
+		createInfo.oldSwapchain = VK_NULL_HANDLE;
+
+		if (vkCreateSwapchainKHR(*context.device, &createInfo, nullptr, &swapChain) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create swap chain!");
+		}
+
+		vkGetSwapchainImagesKHR(*context.device, swapChain, &imageCount, nullptr);
+		swapChainImages.resize(imageCount);
+		vkGetSwapchainImagesKHR(*context.device, swapChain, &imageCount, swapChainImages.data());
+	}
+
+	void createImageViews(Context& context) {
+		swapChainImageViews.resize(swapChainImages.size());
+
+		for (size_t i = 0; i < swapChainImages.size(); i++) {
+			VkImageViewCreateInfo createInfo = {};
+			createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+			createInfo.image = swapChainImages[i];
+			createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+			createInfo.format = *context.swapChainImageFormat;
+
+			createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+			createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+			createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+			createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+
+			createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			createInfo.subresourceRange.baseMipLevel = 0;
+			createInfo.subresourceRange.levelCount = 1;
+			createInfo.subresourceRange.baseArrayLayer = 0;
+			createInfo.subresourceRange.layerCount = 1;
+
+			if (vkCreateImageView(*context.device, &createInfo, nullptr, &swapChainImageViews[i]) != VK_SUCCESS) {
+				throw std::runtime_error("failed to create image views!");
+			}
+		}
+	}
+
+	void createFramebuffers(Context& context) {
+		swapChainFramebuffers.resize(swapChainImageViews.size());
+
+		for (size_t i = 0; i < swapChainImageViews.size(); i++) {
+			VkImageView attachments[] = {
+				swapChainImageViews[i]
+			};
+
+			VkFramebufferCreateInfo framebufferInfo = {};
+			framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+			framebufferInfo.renderPass = *context.renderPass;
+			framebufferInfo.attachmentCount = 1;
+			framebufferInfo.pAttachments = attachments;
+			framebufferInfo.width = (*context.swapChainExtent).width;
+			framebufferInfo.height = (*context.swapChainExtent).height;
+			framebufferInfo.layers = 1;
+
+			if (vkCreateFramebuffer(*context.device, &framebufferInfo, nullptr, &swapChainFramebuffers[i]) != VK_SUCCESS) {
+				throw std::runtime_error("failed to create framebuffer!");
+			}
+		}
+	}
+
+	void createDescriptorSetLayout(Context& context) {
+		VkDescriptorSetLayoutBinding descriptorSetLayoutBinding = {};
+		descriptorSetLayoutBinding.binding = 0; // binding = 0
+		descriptorSetLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+		descriptorSetLayoutBinding.descriptorCount = 1;
+		descriptorSetLayoutBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+		VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCreateInfo = {};
+		descriptorSetLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		descriptorSetLayoutCreateInfo.bindingCount = 1; // only a single binding in this descriptor set layout. 
+		descriptorSetLayoutCreateInfo.pBindings = &descriptorSetLayoutBinding;
+
+		if (vkCreateDescriptorSetLayout(*context.device, &descriptorSetLayoutCreateInfo, NULL, &descriptorSetLayout) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create descriptor set layout");
+		}
+	}
+
+	void createDescriptorSets(Context& context) {
+		descriptorSets.resize(swapChainFramebuffers.size());
+
+		VkDescriptorPoolSize descriptorPoolSize = {};
+		descriptorPoolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+		descriptorPoolSize.descriptorCount = descriptorSets.size();
+
+		VkDescriptorPoolCreateInfo descriptorPoolCreateInfo = {};
+		descriptorPoolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		descriptorPoolCreateInfo.maxSets = 10; // we only need to allocate one descriptor set from the pool.
+		descriptorPoolCreateInfo.poolSizeCount = 1;
+		descriptorPoolCreateInfo.pPoolSizes = &descriptorPoolSize;
+
+		if (vkCreateDescriptorPool(*context.device, &descriptorPoolCreateInfo, NULL, &descriptorPool) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create descriptor pool!");
+		}
+
+		for (size_t i = 0; i < descriptorSets.size(); i++) {
+			
+			VkDescriptorSetAllocateInfo descriptorSetAllocateInfo = {};
+			descriptorSetAllocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+			descriptorSetAllocateInfo.descriptorPool = descriptorPool; // pool to allocate from.
+			descriptorSetAllocateInfo.descriptorSetCount = 1; // allocate a single descriptor set.
+			descriptorSetAllocateInfo.pSetLayouts = &descriptorSetLayout;
+
+			if (vkAllocateDescriptorSets(*context.device, &descriptorSetAllocateInfo, &descriptorSets[i]) != VK_SUCCESS) {
+				throw std::runtime_error("failed to allocate descriptor sets");
+			}
+
+			VkDescriptorImageInfo descriptorImageInfo = {};
+			descriptorImageInfo.imageView = swapChainImageViews[i];
+			descriptorImageInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+			VkWriteDescriptorSet writeDescriptorSet = {};
+			writeDescriptorSet.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			writeDescriptorSet.dstSet = descriptorSets[i]; // write to this descriptor set.
+			writeDescriptorSet.dstBinding = 0; // write to the first, and only binding.
+			writeDescriptorSet.descriptorCount = 1; // update a single descriptor.
+			writeDescriptorSet.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; // storage buffer.
+			writeDescriptorSet.pImageInfo = &descriptorImageInfo;
+
+			// perform the update of the descriptor set.
+			vkUpdateDescriptorSets(*context.device, 1, &writeDescriptorSet, 0, NULL);
+		}
+	}
+
+	void createCommandBuffers(Context& context) {
+		commandBuffers.resize(swapChainFramebuffers.size());
+
+		VkCommandBufferAllocateInfo allocInfo = {};
+		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		allocInfo.commandPool = *context.commandPool;
+		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		allocInfo.commandBufferCount = (uint32_t)commandBuffers.size();
+
+		if (vkAllocateCommandBuffers(*context.device, &allocInfo, commandBuffers.data()) != VK_SUCCESS) {
+			throw std::runtime_error("failed to allocate command buffers!");
+		}
+
+		for (size_t i = 0; i < commandBuffers.size(); i++) {
+			VkCommandBufferBeginInfo beginInfo = {};
+			beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+			beginInfo.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+			beginInfo.pInheritanceInfo = nullptr; // Optional
+
+			if (vkBeginCommandBuffer(commandBuffers[i], &beginInfo) != VK_SUCCESS) {
+				throw std::runtime_error("failed to begin recording command buffer!");
+			}
+
+			vkCmdBindPipeline(commandBuffers[i], VK_PIPELINE_BIND_POINT_COMPUTE, *context.computePipeline);
+			vkCmdBindDescriptorSets(commandBuffers[i], VK_PIPELINE_BIND_POINT_COMPUTE, *context.computePipelineLayout, 0, 1, &descriptorSets[i], 0, NULL);
+			vkCmdDispatch(commandBuffers[i], (uint32_t)ceil(WIDTH_C / float(WORKGROUP_SIZE)), (uint32_t)ceil(HEIGHT_C / float(WORKGROUP_SIZE)), 1);
+
+			if (vkEndCommandBuffer(commandBuffers[i]) != VK_SUCCESS) {
+				throw std::runtime_error("failed to record command buffer!");
+			}
+		}
+	}
+};
+
 class HelloTriangleApplication {
 public:
 	void run() {
@@ -424,6 +649,9 @@ private:
 		createGraphicsPipeline();
 		createCommandPool();
 
+
+		runCompute();
+
 		//createSwapChainPipeline(surface, swapChain);
 		//createSwapChainPipeline(secondSurface, secondSwapChain);
 		Context context;
@@ -434,6 +662,8 @@ private:
 		context.renderPass = &renderPass;
 		context.swapChainExtent = &swapChainExtent;
 		context.swapChainImageFormat = &swapChainImageFormat;
+		context.computePipeline = &pipelineCompute;
+		context.computePipelineLayout = &pipelineComputeLayout;
 
 		swapChain.createSwapChainPipeline(context, surface);
 		secondSwapChain.createSwapChainPipeline(context, secondSurface);
@@ -447,7 +677,7 @@ private:
 			drawFrame(swapChain);
 			drawFrame(secondSwapChain);
 		}
-
+		
 		vkDeviceWaitIdle(device);
 	}
 
@@ -505,7 +735,7 @@ private:
 	VkDeviceMemory bufferMemory;
 
 	void runCompute() {
-		bufferSize = sizeof(Pixel) * WIDTH * HEIGHT;
+		bufferSize = sizeof(Pixel) * WIDTH_C * HEIGHT_C;
 
 		createBuffer();
 		createDescriptorSetLayout();
@@ -518,7 +748,7 @@ private:
 		saveRenderedImage();
 
 		// Clean up all vulkan resources.
-		cleanup();
+		cleanUpCompute();
 	}
 
 	void cleanUpCompute() {
@@ -534,8 +764,8 @@ private:
 		// Get the color data from the buffer, and cast it to bytes.
 		// We save the data to a vector.
 		std::vector<unsigned char> image;
-		image.reserve(WIDTH * HEIGHT * 4);
-		for (int i = 0; i < WIDTH*HEIGHT; i += 1) {
+		image.reserve(WIDTH_C * HEIGHT_C * 4);
+		for (int i = 0; i < WIDTH_C * HEIGHT_C; i += 1) {
 			image.push_back((unsigned char)(255.0f * (pmappedMemory[i].r)));
 			image.push_back((unsigned char)(255.0f * (pmappedMemory[i].g)));
 			image.push_back((unsigned char)(255.0f * (pmappedMemory[i].b)));
@@ -545,7 +775,7 @@ private:
 		vkUnmapMemory(device, bufferMemory);
 
 		// Now we save the acquired color data to a .png.
-		unsigned error = lodepng::encode("mandelbrot.png", image, WIDTH, HEIGHT);
+		unsigned error = lodepng::encode("mandelbrot.png", image, WIDTH_C, HEIGHT_C);
 		if (error) printf("encoder error %d: %s", error, lodepng_error_text(error));
 	}
 
@@ -645,7 +875,7 @@ private:
 		writeDescriptorSet.dstBinding = 0; // write to the first, and only binding.
 		writeDescriptorSet.descriptorCount = 1; // update a single descriptor.
 		writeDescriptorSet.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; // storage buffer.
-		writeDescriptorSet.pBufferInfo = &descriptorBufferInfo;
+		writeDescriptorSet.pBufferInfo = &descriptorBufferInfo; 
 
 		// perform the update of the descriptor set.
 		vkUpdateDescriptorSets(device, 1, &writeDescriptorSet, 0, NULL);
@@ -662,14 +892,19 @@ private:
 		shaderStageCreateInfo.module = compShaderModule;
 		shaderStageCreateInfo.pName = "main";
 
-		VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
+		VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {};
+		pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		pipelineLayoutCreateInfo.setLayoutCount = 1;
+		pipelineLayoutCreateInfo.pSetLayouts = &descriptorComputeLayout;
+
+		/*VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
 		pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 		pipelineLayoutInfo.setLayoutCount = 0; // Optional
 		pipelineLayoutInfo.pSetLayouts = nullptr; // Optional
 		pipelineLayoutInfo.pushConstantRangeCount = 0; // Optional
-		pipelineLayoutInfo.pPushConstantRanges = nullptr; // Optional
+		pipelineLayoutInfo.pPushConstantRanges = nullptr; // Optional*/
 
-		if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineComputeLayout) != VK_SUCCESS) {
+		if (vkCreatePipelineLayout(device, &pipelineLayoutCreateInfo, nullptr, &pipelineComputeLayout) != VK_SUCCESS) {
 			throw std::runtime_error("failed to create pipeline layout!");
 		}
 
@@ -712,7 +947,30 @@ private:
 	}
 
 	void runCommandBuffer() {
+		VkSubmitInfo submitInfo = {};
+		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submitInfo.commandBufferCount = 1; // submit a single command buffer
+		submitInfo.pCommandBuffers = &commandBufferCompute; // the command buffer to submit.
 
+		VkFence fence;
+		VkFenceCreateInfo fenceCreateInfo = {};
+		fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+		fenceCreateInfo.flags = 0;
+
+		if (vkCreateFence(device, &fenceCreateInfo, NULL, &fence) != VK_SUCCESS) {
+			throw std::runtime_error("chuj");
+		}
+
+		
+		if (vkQueueSubmit(computeQueue, 1, &submitInfo, fence) != VK_SUCCESS) {
+			throw std::runtime_error("chuj");
+		}
+
+		if (vkWaitForFences(device, 1, &fence, VK_TRUE, 100000000000) != VK_SUCCESS) {
+			throw std::runtime_error("chuj");
+		}
+
+		vkDestroyFence(device, fence, NULL);
 	}
 
 	// !!!!!!!!!!!!!!!!!!!!!! compute pipeline part
@@ -1136,6 +1394,59 @@ private:
 		if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
 			throw std::runtime_error("failed to submit draw command buffer!");
 		}
+
+		VkPresentInfoKHR presentInfo = {};
+		presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+
+		presentInfo.waitSemaphoreCount = 1;
+		presentInfo.pWaitSemaphores = signalSemaphores;
+
+		VkSwapchainKHR swapChains[] = { swapChain.swapChain };
+		presentInfo.swapchainCount = 1;
+		presentInfo.pSwapchains = swapChains;
+		presentInfo.pImageIndices = &imageIndex;
+
+		vkQueuePresentKHR(presentQueue, &presentInfo);
+	}
+
+	void drawFrame(SwapChainCompute& swapChain) {
+		uint32_t imageIndex;
+		vkAcquireNextImageKHR(device, swapChain.swapChain, std::numeric_limits<uint64_t>::max(), imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+
+		VkSubmitInfo submitInfo = {};
+		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &swapChain.commandBuffers[imageIndex];
+
+		VkSemaphore waitSemaphores[] = { imageAvailableSemaphore };
+		VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT };
+		submitInfo.waitSemaphoreCount = 1;
+		submitInfo.pWaitSemaphores = waitSemaphores;
+		submitInfo.pWaitDstStageMask = waitStages;
+
+		VkSemaphore signalSemaphores[] = { renderFinishedSemaphore };
+		submitInfo.signalSemaphoreCount = 1;
+		submitInfo.pSignalSemaphores = signalSemaphores;
+
+		VkFence fence;
+		VkFenceCreateInfo fenceCreateInfo = {};
+		fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+		fenceCreateInfo.flags = 0;
+
+		if (vkCreateFence(device, &fenceCreateInfo, NULL, &fence) != VK_SUCCESS) {
+			throw std::runtime_error("chuj");
+		}
+
+
+		if (vkQueueSubmit(computeQueue, 1, &submitInfo, fence) != VK_SUCCESS) {
+			throw std::runtime_error("chuj");
+		}
+
+		if (vkWaitForFences(device, 1, &fence, VK_TRUE, 100000000000) != VK_SUCCESS) {
+			throw std::runtime_error("chuj");
+		}
+
+		vkDestroyFence(device, fence, NULL);
 
 		VkPresentInfoKHR presentInfo = {};
 		presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
