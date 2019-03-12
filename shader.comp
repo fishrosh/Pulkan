@@ -11,9 +11,9 @@ struct Pixel{
 };
 
 
-/*layout ( std140, binding = 0 ) uniform writeonly image2D buf*/
+layout ( rgba32f, binding = 0 ) uniform image2D imgIn;
 
-layout(std140, binding = 0) image2D imgOut
+layout(std140, binding = 1) buffer imgOut
 {
    Pixel imageData[];
 };
@@ -56,4 +56,7 @@ void main() {
           
   // store the rendered mandelbrot set into a storage buffer:
   imageData[WIDTH * gl_GlobalInvocationID.y + gl_GlobalInvocationID.x].value = color;
+  
+  ivec2 pixel_coords = ivec2(gl_GlobalInvocationID.xy);
+  // imageStore(imgIn, pixel_coords, color);
 }
